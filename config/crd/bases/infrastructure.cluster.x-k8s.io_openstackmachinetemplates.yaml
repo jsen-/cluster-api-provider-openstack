@@ -132,6 +132,10 @@ spec:
                               description: Subnet within a network to use
                               items:
                                 properties:
+                                  access:
+                                    description: If true, use the IP from this subnet
+                                      as loadbalancer member
+                                    type: boolean
                                   filter:
                                     description: Filters for optional network query
                                     properties:

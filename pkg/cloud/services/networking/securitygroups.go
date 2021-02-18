@@ -487,7 +487,7 @@ func (s *Service) createRule(r infrav1.SecurityGroupRule) (infrav1.SecurityGroup
 	etherType := rules.RuleEtherType(r.EtherType)
 
 	createOpts := rules.CreateOpts{
-		Description:    r.Description,
+		// Description:    r.Description,
 		Direction:      dir,
 		PortRangeMin:   r.PortRangeMin,
 		PortRangeMax:   r.PortRangeMax,

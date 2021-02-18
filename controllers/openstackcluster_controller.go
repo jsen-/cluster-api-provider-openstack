@@ -134,12 +134,6 @@ func (r *OpenStackClusterReconciler) reconcileDelete(ctx context.Context, log lo
 				return reconcile.Result{}, errors.Errorf("failed to delete bastion: %v", err)
 			}
 			r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteServer", "Deleted server %s with id %s", bastion.Name, bastion.ID)
-			if openStackCluster.Spec.Bastion.FloatingIP == "" {
-				if err = networkingService.DeleteFloatingIP(bastion.FloatingIP); err != nil {
-					return reconcile.Result{}, errors.Errorf("failed to delete floating IP: %v", err)
-				}
-				r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteFloatingIP", "Deleted floating IP %s", bastion.FloatingIP)
-			}
 		}
 
 		if bastionSecGroup := openStackCluster.Status.BastionSecurityGroup; bastionSecGroup != nil {
@@ -148,6 +142,7 @@ func (r *OpenStackClusterReconciler) reconcileDelete(ctx context.Context, log lo
 				return reconcile.Result{}, errors.Errorf("failed to delete security group: %v", err)
 			}
 			r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteSecurityGroup", "Deleted security group %s with id %s", bastionSecGroup.Name, bastionSecGroup.ID)
+
 		}
 	}
 
@@ -157,17 +152,12 @@ func (r *OpenStackClusterReconciler) reconcileDelete(ctx context.Context, log lo
 	}
 
 	if openStackCluster.Spec.ManagedAPIServerLoadBalancer {
-		if apiLb := openStackCluster.Status.Network.APIServerLoadBalancer; apiLb != nil {
-			if err = loadBalancerService.DeleteLoadBalancer(apiLb.Name, openStackCluster); err != nil {
-				return reconcile.Result{}, errors.Errorf("failed to delete load balancer: %v", err)
-			}
-			r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteLoadBalancer", "Deleted load balancer %s with id %s", apiLb.Name, apiLb.ID)
-
-			if openStackCluster.Spec.APIServerFloatingIP == "" {
-				if err = networkingService.DeleteFloatingIP(apiLb.IP); err != nil {
-					return reconcile.Result{}, errors.Errorf("failed to delete floating IP: %v", err)
+		if openStackCluster.Status.Network != nil {
+			if apiLb := openStackCluster.Status.Network.APIServerLoadBalancer; apiLb != nil {
+				if err = loadBalancerService.DeleteLoadBalancer(apiLb.Name, openStackCluster); err != nil {
+					return reconcile.Result{}, errors.Errorf("failed to delete load balancer: %v", err)
 				}
-				r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteFloatingIP", "Deleted floating IP %s", apiLb.IP)
+				r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteLoadBalancer", "Deleted load balancer %s with id %s", apiLb.Name, apiLb.ID)
 			}
 		}
 	}
@@ -189,13 +179,15 @@ func (r *OpenStackClusterReconciler) reconcileDelete(ctx context.Context, log lo
 		r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteSecurityGroup", "Deleted security group %s with id %s", controlPlaneSecGroup.Name, controlPlaneSecGroup.ID)
 	}
 
-	if router := openStackCluster.Status.Network.Router; router != nil {
-		log.Info("Deleting router", "name", router.Name)
-		if err = networkingService.DeleteRouter(openStackCluster.Status.Network); err != nil {
-			return ctrl.Result{}, errors.Errorf("failed to delete router: %v", err)
+	if openStackCluster.Status.Network != nil {
+		if router := openStackCluster.Status.Network.Router; router != nil {
+			log.Info("Deleting router", "name", router.Name)
+			if err = networkingService.DeleteRouter(openStackCluster.Status.Network); err != nil {
+				return ctrl.Result{}, errors.Errorf("failed to delete router: %v", err)
+			}
+			r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteRouter", "Deleted router %s with id %s", router.Name, router.ID)
+			log.Info("OpenStack router deleted successfully")
 		}
-		r.Recorder.Eventf(openStackCluster, corev1.EventTypeNormal, "SuccessfulDeleteRouter", "Deleted router %s with id %s", router.Name, router.ID)
-		log.Info("OpenStack router deleted successfully")
 	}
 
 	// if NodeCIDR was not set, no network was created.
@@ -304,15 +296,15 @@ func (r *OpenStackClusterReconciler) reconcileBastion(log logr.Logger, osProvide
 		return err
 	}
 
-	instance, err := computeService.InstanceExists(fmt.Sprintf("%s-bastion", cluster.Name))
+	exists, err := computeService.InstanceExists(fmt.Sprintf("%s-bastion", cluster.Name))
 	if err != nil {
 		return err
 	}
-	if instance != nil {
+	if !exists {
 		return nil
 	}
 
-	instance, err = computeService.CreateBastion(cluster.Name, openStackCluster)
+	instance, err := computeService.CreateBastion(cluster.Name, openStackCluster)
 	if err != nil {
 		return errors.Errorf("failed to reconcile bastion: %v", err)
 	}
@@ -403,14 +395,26 @@ func (r *OpenStackClusterReconciler) reconcileNetworkComponents(log logr.Logger,
 			return errors.Errorf("failed to reconcile router: %v", err)
 		}
 	}
-	if !openStackCluster.Spec.ControlPlaneEndpoint.IsValid() {
+
+	if openStackCluster.Spec.ControlPlaneEndpoint.IsZero() {
+		var controlPlaneEndpointHost string
 		var port int32
-		if openStackCluster.Spec.APIServerPort == 0 {
-			port = 6443
+		if openStackCluster.Spec.ManagedAPIServerLoadBalancer {
+			controlPlaneEndpointHost = openStackCluster.Spec.APIServerLoadBalancerFloatingIP
+			if openStackCluster.Spec.APIServerLoadBalancerPort == 0 {
+				port = 6443
+			} else {
+				port = int32(openStackCluster.Spec.APIServerLoadBalancerPort)
+			}
 		} else {
-			port = int32(openStackCluster.Spec.APIServerPort)
+			controlPlaneEndpointHost = openStackCluster.Spec.ControlPlaneEndpoint.Host
+			if openStackCluster.Spec.ControlPlaneEndpoint.Port == 0 {
+				port = 6443
+			} else {
+				port = openStackCluster.Spec.ControlPlaneEndpoint.Port
+			}
 		}
-		fp, err := networkingService.GetOrCreateFloatingIP(openStackCluster, openStackCluster.Spec.APIServerFloatingIP)
+		fp, err := networkingService.GetOrCreateFloatingIP(openStackCluster, controlPlaneEndpointHost)
 		if err != nil {
 			return errors.Errorf("Floating IP cannot be got or created: %v", err)
 		}

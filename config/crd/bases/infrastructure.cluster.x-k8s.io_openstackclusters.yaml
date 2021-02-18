@@ -64,20 +64,20 @@ spec:
           spec:
             description: OpenStackClusterSpec defines the desired state of OpenStackCluster
             properties:
-              apiServerFloatingIP:
-                description: APIServerFloatingIP is the floatingIP which will be associated
-                  to the APIServer. The floatingIP will be created if it not already
-                  exists.
-                type: string
               apiServerLoadBalancerAdditionalPorts:
                 description: APIServerLoadBalancerAdditionalPorts adds additional
                   ports to the APIServerLoadBalancer
                 items:
                   type: integer
                 type: array
-              apiServerPort:
-                description: APIServerPort is the port on which the listener on the
-                  APIServer will be created
+              apiServerLoadBalancerFloatingIP:
+                description: APIServerLoadBalancerFloatingIP is the floatingIP which
+                  will be associated to the APIServer loadbalancer. The floatingIP
+                  will be created if it not already exists.
+                type: string
+              apiServerLoadBalancerPort:
+                description: APIServerLoadBalancerPort is the port on which the listener
+                  on the APIServer loadbalancer will be created
                 type: integer
               bastion:
                 description: Bastion is the OpenStack instance to login the nodes
@@ -136,6 +136,10 @@ spec:
                           description: Subnet within a network to use
                           items:
                             properties:
+                              access:
+                                description: If true, use the IP from this subnet
+                                  as loadbalancer member
+                                type: boolean
                               filter:
                                 description: Filters for optional network query
                                 properties:
@@ -303,6 +307,10 @@ spec:
                       description: The subnet in which the FixedIP is used for the
                         Gateway of this router
                       properties:
+                        access:
+                          description: If true, use the IP from this subnet as loadbalancer
+                            member
+                          type: boolean
                         filter:
                           description: Filters for optional network query
                           properties:
@@ -361,7 +369,7 @@ spec:
               managedAPIServerLoadBalancer:
                 description: 'ManagedAPIServerLoadBalancer defines whether a LoadBalancer
                   for the APIServer should be created. If set to true the following
-                  properties are mandatory: APIServerFloatingIP, APIServerPort'
+                  properties are mandatory: APIServerLoadBalancerFloatingIP, APIServerLoadBalancerPort'
                 type: boolean
               managedSecurityGroups:
                 description: 'ManagedSecurityGroups defines that kubernetes manages

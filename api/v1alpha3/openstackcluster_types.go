@@ -68,18 +68,18 @@ type OpenStackClusterSpec struct {
 
 	// ManagedAPIServerLoadBalancer defines whether a LoadBalancer for the
 	// APIServer should be created. If set to true the following properties are
-	// mandatory: APIServerFloatingIP, APIServerPort
+	// mandatory: APIServerLoadBalancerFloatingIP, APIServerLoadBalancerPort
 	// +optional
 	ManagedAPIServerLoadBalancer bool `json:"managedAPIServerLoadBalancer"`
 
-	// APIServerFloatingIP is the floatingIP which will be associated
-	// to the APIServer. The floatingIP will be created if it not
+	// APIServerLoadBalancerFloatingIP is the floatingIP which will be associated
+	// to the APIServer loadbalancer. The floatingIP will be created if it not
 	// already exists.
-	APIServerFloatingIP string `json:"apiServerFloatingIP,omitempty"`
+	APIServerLoadBalancerFloatingIP string `json:"apiServerLoadBalancerFloatingIP,omitempty"`
 
-	// APIServerPort is the port on which the listener on the APIServer
-	// will be created
-	APIServerPort int `json:"apiServerPort,omitempty"`
+	// APIServerLoadBalancerPort is the port on which the listener on the APIServer
+	// loadbalancer will be created
+	APIServerLoadBalancerPort int `json:"apiServerLoadBalancerPort,omitempty"`
 
 	// APIServerLoadBalancerAdditionalPorts adds additional ports to the APIServerLoadBalancer
 	APIServerLoadBalancerAdditionalPorts []int `json:"apiServerLoadBalancerAdditionalPorts,omitempty"`

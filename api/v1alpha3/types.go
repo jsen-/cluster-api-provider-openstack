@@ -90,6 +90,9 @@ type SubnetParam struct {
 
 	// Filters for optional network query
 	Filter SubnetFilter `json:"filter,omitempty"`
+
+	// If true, use the IP from this subnet as loadbalancer member
+	Access bool `json:"access,omitempty"`
 }
 
 type SubnetFilter struct {
@@ -221,15 +224,27 @@ type SecurityGroupRule struct {
 
 // Equal checks if two SecurityGroupRules are the same.
 func (r SecurityGroupRule) Equal(x SecurityGroupRule) bool {
-	return (r.Direction == x.Direction &&
-		r.Description == x.Description &&
-		r.EtherType == x.EtherType &&
-		r.PortRangeMin == x.PortRangeMin &&
-		r.PortRangeMax == x.PortRangeMax &&
-		r.Protocol == x.Protocol &&
-		r.RemoteGroupID == x.RemoteGroupID &&
-		r.RemoteIPPrefix == x.RemoteIPPrefix)
+	if r.Direction != x.Direction ||
+		r.Description != x.Description ||
+		r.EtherType != x.EtherType ||
+		r.PortRangeMin != x.PortRangeMin ||
+		r.RemoteGroupID != x.RemoteGroupID ||
+		r.RemoteIPPrefix != x.RemoteIPPrefix {
+		return false
+	}
+	if r.Protocol == x.Protocol || r.Protocol == "any" && x.Protocol == "" || r.Protocol == "" && x.Protocol == "any" {
+		if r.PortRangeMin == 0 {
+			if r.PortRangeMax == 0 || r.PortRangeMax == 65535 {
+				if x.PortRangeMax == 0 || x.PortRangeMax == 65535 {
+					return true
+				}
+			}
+		}
 
+		return true
+	}
+
+	return false
 }
 
 // InstanceState describes the state of an OpenStack instance.

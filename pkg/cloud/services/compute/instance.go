@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/gophercloud/gophercloud"
-	"github.com/gophercloud/gophercloud/openstack/common/extensions"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/attachinterfaces"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/bootfromvolume"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/floatingips"
@@ -33,13 +32,13 @@ import (
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/schedulerhints"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
 	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
-	netext "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/attributestags"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/trunks"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
 	"github.com/gophercloud/gophercloud/openstack/networking/v2/subnets"
+	"sigs.k8s.io/cluster-api-provider-openstack/api/v1alpha3"
 	infrav1 "sigs.k8s.io/cluster-api-provider-openstack/api/v1alpha3"
 	"sigs.k8s.io/cluster-api-provider-openstack/pkg/cloud/services/networking"
 	"sigs.k8s.io/cluster-api-provider-openstack/pkg/record"
@@ -79,7 +78,6 @@ func (s *Service) InstanceCreate(clusterName string, machine *clusterv1.Machine,
 		Metadata:      openStackMachine.Spec.ServerMetadata,
 		ConfigDrive:   openStackMachine.Spec.ConfigDrive,
 		FailureDomain: *machine.Spec.FailureDomain,
-		RootVolume:    openStackMachine.Spec.RootVolume,
 	}
 
 	if openStackMachine.Spec.Trunk {
@@ -255,7 +253,47 @@ func (s *Service) createInstance(clusterName string, i *infrav1.Instance) (*infr
 			return false, nil
 
 		}
-		return instance.State == infrav1.InstanceStateActive, nil
+		type networkInterface struct {
+			Address string  `json:"addr"`
+			Version float64 `json:"version"`
+			Type    string  `json:"OS-EXT-IPS:type"`
+		}
+		if instance.State == infrav1.InstanceStateActive {
+			for _, b := range server.Addresses {
+				list, err := json.Marshal(b)
+				if err != nil {
+					return false, fmt.Errorf("extract IP from instance err: %v", err)
+				}
+				var networks map[string]networkInterface
+				err = json.Unmarshal(list, &networks)
+				if err != nil {
+					return false, fmt.Errorf("extract IP from instance err: %v", err)
+				}
+				for networkName, network := range networks {
+					for _, nw := range *i.Networks {
+						if nw.Name == networkName {
+							if network.Version == 4.0 {
+								_, err := servers.Update(s.computeClient, server.ID, servers.UpdateOpts{
+									AccessIPv4: network.Address,
+								}).Extract()
+								if err != nil {
+									return false, err
+								}
+							} else if network.Version == 6.0 {
+								_, err := servers.Update(s.computeClient, server.ID, servers.UpdateOpts{
+									AccessIPv6: network.Address,
+								}).Extract()
+								if err != nil {
+									return false, err
+								}
+							}
+						}
+					}
+				}
+			}
+			return true, nil
+		}
+		return false, nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("error creating Openstack instance %s, %v", server.ID, err)
@@ -362,21 +400,21 @@ func applyServerGroupID(opts servers.CreateOptsBuilder, serverGroupID string) se
 }
 
 func getTrunkSupport(is *Service) (bool, error) {
-	allPages, err := netext.List(is.networkClient).AllPages()
-	if err != nil {
-		return false, err
-	}
+	// allPages, err := netext.List(is.networkClient).AllPages()
+	// if err != nil {
+	// 	return false, err
+	// }
 
-	allExts, err := extensions.ExtractExtensions(allPages)
-	if err != nil {
-		return false, err
-	}
+	// allExts, err := extensions.ExtractExtensions(allPages)
+	// if err != nil {
+	// 	return false, err
+	// }
 
-	for _, ext := range allExts {
-		if ext.Alias == "trunk" {
-			return true, nil
-		}
-	}
+	// for _, ext := range allExts {
+	// 	if ext.Alias == "trunk" {
+	// 		return true, nil
+	// 	}
+	// }
 	return false, nil
 }
 
@@ -418,14 +456,15 @@ func getServerNetworks(networkClient *gophercloud.ServiceClient, networkParams [
 	for _, net := range networkParams {
 		opts := networks.ListOpts(net.Filter)
 		opts.ID = net.UUID
-		ids, err := networking.GetNetworkIDsByFilter(networkClient, &opts)
+		networks, err := networking.GetNetworksByFilter(networkClient, &opts)
 		if err != nil {
 			return nil, err
 		}
-		for _, netID := range ids {
+		for _, nw := range networks {
 			if net.Subnets == nil {
 				nets = append(nets, infrav1.Network{
-					ID: netID,
+					ID:   nw.ID,
+					Name: nw.Name,
 				})
 				continue
 			}
@@ -433,14 +472,15 @@ func getServerNetworks(networkClient *gophercloud.ServiceClient, networkParams [
 			for _, subnet := range net.Subnets {
 				subnetOpts := subnets.ListOpts(subnet.Filter)
 				subnetOpts.ID = subnet.UUID
-				subnetOpts.NetworkID = netID
+				subnetOpts.NetworkID = nw.ID
 				subnetsByFilter, err := networking.GetSubnetsByFilter(networkClient, &subnetOpts)
 				if err != nil {
 					return nil, err
 				}
 				for _, subnetByFilter := range subnetsByFilter {
 					nets = append(nets, infrav1.Network{
-						ID: subnetByFilter.NetworkID,
+						ID:   subnetByFilter.NetworkID,
+						Name: nw.Name,
 						Subnet: &infrav1.Subnet{
 							ID: subnetByFilter.ID,
 						},
@@ -622,8 +662,78 @@ func (s *Service) GetInstance(resourceID string) (instance *infrav1.Instance, er
 	}
 	return i, err
 }
+func (s *Service) GetServerIPv4(resourceID string, networkName string) (string, error) {
+	if resourceID == "" {
+		return "", fmt.Errorf("resourceId should be specified to get detail")
+	}
+	allPages, err := servers.ListAddresses(s.computeClient, resourceID).AllPages()
+	if err != nil {
+		return "", err
+	}
+	addresses, err := servers.ExtractAddresses(allPages)
+	if err != nil {
+		return "", err
+	}
+	for nwName, b := range addresses {
+		if nwName == networkName {
+			for _, nw := range b {
+				if nw.Version == 4.0 {
+					return nw.Address, nil
+				}
+			}
+		}
+	}
 
-func (s *Service) InstanceExists(name string) (instance *infrav1.Instance, err error) {
+	return "", nil
+}
+
+func (s *Service) GetAccessNetworkName(networList []v1alpha3.NetworkParam) (string, error) {
+	for _, net := range networList {
+		for _, subnet := range net.Subnets {
+			if subnet.Access {
+				nws, err := getServerNetworks(s.networkClient, []infrav1.NetworkParam{net})
+				if err != nil {
+					return "", err
+				}
+				if err != nil {
+					return "", fmt.Errorf("Error occured while searching for access network: %v", err)
+				}
+				if len(nws) == 0 {
+					return "", fmt.Errorf("Access network not found by filter: %v", net)
+				}
+				if len(nws) > 1 {
+					return "", fmt.Errorf("More than one access network: %v", nws)
+				}
+				return nws[0].Name, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func (s *Service) InstanceExists(name string) (bool, error) {
+
+	var listOpts servers.ListOpts
+	if name != "" {
+		listOpts = servers.ListOpts{
+			Name: name,
+		}
+	} else {
+		listOpts = servers.ListOpts{}
+	}
+
+	allPages, err := servers.List(s.computeClient, listOpts).AllPages()
+	if err != nil {
+		return false, fmt.Errorf("get service list: %v", err)
+	}
+	serverList, err := servers.ExtractServers(allPages)
+	if err != nil {
+		return false, fmt.Errorf("extract services list: %v", err)
+	}
+	return len(serverList) != 0, nil
+}
+
+func (s *Service) InstanceGetByName(name string) (instance *infrav1.Instance, err error) {
 
 	var listOpts servers.ListOpts
 	if name != "" {

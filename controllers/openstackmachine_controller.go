@@ -202,11 +202,6 @@ func (r *OpenStackMachineReconciler) reconcileDelete(ctx context.Context, logger
 		return ctrl.Result{}, err
 	}
 
-	networkingService, err := networking.NewService(osProviderClient, clientOpts, logger)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	loadBalancerService, err := loadbalancer.NewService(osProviderClient, clientOpts, logger, openStackCluster.Spec.UseOctavia)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -218,12 +213,12 @@ func (r *OpenStackMachineReconciler) reconcileDelete(ctx context.Context, logger
 		}
 	}
 
-	instance, err := computeService.InstanceExists(openStackMachine.Name)
+	exists, err := computeService.InstanceExists(openStackMachine.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if instance == nil {
+	if !exists {
 		logger.Info("Skipped deleting machine that is already deleted")
 		controllerutil.RemoveFinalizer(openStackMachine, infrav1.MachineFinalizer)
 		if err := patchHelper.Patch(ctx, openStackMachine); err != nil {
@@ -231,7 +226,9 @@ func (r *OpenStackMachineReconciler) reconcileDelete(ctx context.Context, logger
 		}
 		return ctrl.Result{}, nil
 	}
-
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	// TODO(sbueringer) wait for instance deleted
 	err = computeService.InstanceDelete(machine)
 	if err != nil {
@@ -239,16 +236,7 @@ func (r *OpenStackMachineReconciler) reconcileDelete(ctx context.Context, logger
 		return ctrl.Result{}, nil
 	}
 	logger.Info("OpenStack machine deleted successfully")
-	r.Recorder.Eventf(openStackMachine, corev1.EventTypeNormal, "SuccessfulDeleteServer", "Deleted server %s with id %s", instance.Name, instance.ID)
-
-	if util.IsControlPlaneMachine(machine) && openStackCluster.Spec.APIServerFloatingIP == "" {
-		if err = networkingService.DeleteFloatingIP(instance.FloatingIP); err != nil {
-			handleUpdateMachineError(logger, openStackMachine, errors.Errorf("error deleting Openstack floating IP: %v", err))
-			return ctrl.Result{}, nil
-		}
-		logger.Info("OpenStack floating IP deleted successfully", "Floating IP", instance.FloatingIP)
-		r.Recorder.Eventf(openStackMachine, corev1.EventTypeNormal, "SuccessfulDeleteFloatingIP", "Deleted floating IP %s", instance.FloatingIP)
-	}
+	r.Recorder.Eventf(openStackMachine, corev1.EventTypeNormal, "SuccessfulDeleteServer", "Deleted server %s", openStackMachine.Name)
 
 	// Instance is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(openStackMachine, infrav1.MachineFinalizer)
@@ -355,7 +343,7 @@ func (r *OpenStackMachineReconciler) reconcileNormal(ctx context.Context, logger
 			return ctrl.Result{}, nil
 		}
 	} else if util.IsControlPlaneMachine(machine) {
-		fp, err := networkingService.GetOrCreateFloatingIP(openStackCluster, openStackCluster.Spec.ControlPlaneEndpoint.Host)
+		fp, err := networkingService.GetOrCreateFloatingIP(openStackCluster, openStackMachine.Spec.FloatingIP)
 		if err != nil {
 			handleUpdateMachineError(logger, openStackMachine, errors.Errorf("Floating IP cannot be got or created: %v", err))
 			return ctrl.Result{}, nil
@@ -373,19 +361,21 @@ func (r *OpenStackMachineReconciler) reconcileNormal(ctx context.Context, logger
 
 func (r *OpenStackMachineReconciler) getOrCreate(computeService *compute.Service, machine *clusterv1.Machine, openStackMachine *infrav1.OpenStackMachine, cluster *clusterv1.Cluster, openStackCluster *infrav1.OpenStackCluster, userData string) (*infrav1.Instance, error) {
 
-	instance, err := computeService.InstanceExists(openStackMachine.Name)
+	exists, err := computeService.InstanceExists(openStackMachine.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	if instance == nil {
-		instance, err = computeService.InstanceCreate(cluster.Name, machine, openStackMachine, openStackCluster, userData)
+	if !exists {
+		instance, err := computeService.InstanceCreate(cluster.Name, machine, openStackMachine, openStackCluster, userData)
 		if err != nil {
 			return nil, errors.Errorf("error creating Openstack instance: %v", err)
 		}
+
+		return instance, nil
 	}
 
-	return instance, nil
+	return computeService.InstanceGetByName(openStackMachine.Name)
 }
 
 func handleUpdateMachineError(logger logr.Logger, openstackMachine *infrav1.OpenStackMachine, message error) {
@@ -397,7 +387,29 @@ func handleUpdateMachineError(logger logr.Logger, openstackMachine *infrav1.Open
 }
 
 func (r *OpenStackMachineReconciler) reconcileLoadBalancerMember(logger logr.Logger, osProviderClient *gophercloud.ProviderClient, clientOpts *clientconfig.ClientOpts, instance *infrav1.Instance, clusterName string, machine *clusterv1.Machine, openStackMachine *infrav1.OpenStackMachine, openStackCluster *infrav1.OpenStackCluster) error {
-	ip := instance.IP
+	computeService, err := compute.NewService(osProviderClient, clientOpts, logger)
+	if err != nil {
+		return err
+	}
+	accessNetworkName, err := computeService.GetAccessNetworkName(openStackMachine.Spec.Networks)
+	if err != nil {
+		return err
+	}
+	ip := ""
+	if accessNetworkName != "" {
+		computeService, err := compute.NewService(osProviderClient, clientOpts, logger)
+		if err != nil {
+			return err
+		}
+		ip, err = computeService.GetServerIPv4(instance.ID, accessNetworkName)
+		if err != nil {
+			return err
+		}
+	}
+	if ip == "" {
+		ip = instance.IP
+	}
+
 	loadbalancerService, err := loadbalancer.NewService(osProviderClient, clientOpts, logger, openStackCluster.Spec.UseOctavia)
 	if err != nil {
 		return err
